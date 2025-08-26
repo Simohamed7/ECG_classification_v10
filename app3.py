@@ -1,4 +1,5 @@
 # app_ecg_streamlit.py
+import io, requests
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -145,20 +146,57 @@ st.markdown(
 )
 
 # =========================
+# Zone "Samples" (exemples GitHub)
+# =========================
+# ⚠️ Remplace <user>/<repo> par ton dépôt et assure-toi d'utiliser des "Raw URLs"
+SAMPLES = {
+    "signal1.mat": "https://raw.githubusercontent.com/<user>/<repo>/main/samples/signals/signal1.mat",
+    "signal2.csv": "https://raw.githubusercontent.com/<user>/<repo>/main/samples/signals/signal2.csv",
+    "beat1.png":   "https://raw.githubusercontent.com/<user>/<repo>/main/samples/images/beat1.png",
+    "beat2.jpg":   "https://raw.githubusercontent.com/<user>/<repo>/main/samples/images/beat2.jpg",
+}
+
+with st.expander("📁 Samples (exemples GitHub)"):
+    sample_name = st.selectbox("Choisir un exemple :", list(SAMPLES.keys()))
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("⬇️ Charger l'exemple sélectionné"):
+            try:
+                url = SAMPLES[sample_name]
+                r = requests.get(url, timeout=20)
+                r.raise_for_status()
+                bio = io.BytesIO(r.content)
+                bio.name = sample_name  # important pour .name.lower()
+                st.session_state["sample_file"] = bio
+                st.success(f"Exemple chargé : {sample_name}")
+            except Exception as e:
+                st.error(f"Échec du téléchargement : {e}")
+    with c2:
+        if st.button("🔄 Réinitialiser l'exemple"):
+            st.session_state.pop("sample_file", None)
+            st.info("Exemple réinitialisé. Utilisez l'upload ou rechargez un sample.")
+
+# =========================
 # Sidebar
 # =========================
 st.sidebar.header("⚙️ Paramètres")
 model_choice = st.sidebar.radio("📌 Choix du modèle :", ["FrFT", "Beat"], index=0)
 model_paths = {"FrFT": "FrFT.h5", "Beat": "Beat.h5"}
 
+st.sidebar.write("Sélectionnez un fichier de test (.mat / .csv / .png / .jpg)")
 uploaded_signal = st.sidebar.file_uploader(
-    "Importer ECG (.mat, .csv, .png, .jpg)", 
+    "Importer ECG (.mat, .csv, .png, .jpg)",
     type=["mat","csv","png","jpg","jpeg"]
 )
 
+# Si un sample est choisi, il remplace l'upload
+if "sample_file" in st.session_state and st.session_state["sample_file"] is not None:
+    uploaded_signal = st.session_state["sample_file"]
+    st.info(f"Fichier en cours : **{uploaded_signal.name}** (depuis Samples)")
+
 # fs & alpha
 fs = st.sidebar.number_input("Fréquence d'échantillonnage (Hz)", value=360, step=10, min_value=50, max_value=2000)
-alpha_selected = st.sidebar.slider("Ordre FrFT (alpha)", 0.01, 1.0, 0.01, 0.01)
+alpha_selected = st.sidebar.slider("Ordre FrFT (alpha)", 0.01, 1.0, 0.50, 0.01)
 
 # =========================
 # Chargement modèle (non bloquant)
@@ -171,7 +209,7 @@ if model is None:
 # Fichier requis
 # =========================
 if uploaded_signal is None:
-    st.info("Chargez un fichier ECG pour commencer.")
+    st.info("Chargez un fichier ECG pour commencer (ou utilisez un Sample).")
     st.stop()
 
 signal = None
@@ -314,7 +352,7 @@ for i, seg in enumerate(beats):
         ax_seg.grid(True, alpha=0.3)
         st.pyplot(fig_seg); plt.close(fig_seg)
 
-# Images FrFT (alpha >= 0.01 … 1.0)
+# Images FrFT (α contrôlé par le slider 0.01→1.0)
 imgs_pil = [frft_magnitude_image(b, alpha_selected, (224,224)) for b in beats]
 X = np.stack([np.array(img, dtype=np.float32)/255.0 for img in imgs_pil], axis=0)
 
