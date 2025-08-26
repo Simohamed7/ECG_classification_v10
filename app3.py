@@ -1,5 +1,6 @@
 # app_ecg_streamlit.py
-import io, requests, os
+import io, os, requests
+from urllib.parse import quote
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -9,9 +10,16 @@ import matplotlib.pyplot as plt
 from math import pi
 from PIL import Image
 from tensorflow.keras.models import load_model
-from urllib.parse import quote
 
 st.set_page_config(page_title="Classification ECG", layout="wide")
+
+# =========================
+# CONFIG
+# =========================
+GITHUB_USER = "Simohamed7"
+GITHUB_REPO = "ECG_classification_v10"
+GITHUB_BRANCH = "main"
+LOCAL_SAMPLES_DIR = "SAMPLES"
 
 # =========================
 # Modèles (cache + non bloquant)
@@ -131,7 +139,7 @@ def ecg_likeness_from_std(std_val: float, low_ok=5.0, high_ok=30.0) -> str:
 col1, col2 = st.columns([1, 8])
 with col1:
     try:
-        logo = Image.open("heart.png")   # Ajoute un 'heart.png' (cœur anatomique)
+        logo = Image.open("heart.png")   # Ajoute un 'heart.png' (cœur anatomique) à la racine si tu veux
         st.image(logo, width=60)
     except Exception:
         st.write("❤️")  # fallback universel
@@ -147,58 +155,90 @@ st.markdown(
 )
 
 # =========================
-# Zone "Samples" (local OU GitHub)
+# LISTING SAMPLES (LOCAL + GITHUB, RÉCURSIF, AVEC DIAGNOSTIC)
 # =========================
-GITHUB_USER = "Simohamed7"
-GITHUB_REPO = "ECG_classification_v10"
-GITHUB_BRANCH = "main"
-GITHUB_BASE = f"https://raw.githubusercontent.com/{quote(GITHUB_USER)}/{quote(GITHUB_REPO)}/{quote(GITHUB_BRANCH)}/SAMPLES"
-
-LOCAL_SAMPLES_DIR = "SAMPLES"
-
 @st.cache_data(ttl=300)
-def list_local_samples():
+def list_local_samples_recursive(base_dir="SAMPLES"):
+    """Parcourt récursivement SAMPLES/ et récupère .mat/.csv/.png/.jpg/.jpeg"""
     out = {}
-    # signals
-    loc_sig = os.path.join(LOCAL_SAMPLES_DIR, "signals")
-    if os.path.isdir(loc_sig):
-        for f in os.listdir(loc_sig):
-            if f.lower().endswith((".mat", ".csv")):
-                out[f] = os.path.join(loc_sig, f)
-    # images
-    loc_img = os.path.join(LOCAL_SAMPLES_DIR, "images")
-    if os.path.isdir(loc_img):
-        for f in os.listdir(loc_img):
-            if f.lower().endswith((".png", ".jpg", ".jpeg")):
-                out[f] = os.path.join(loc_img, f)
+    if not os.path.isdir(base_dir):
+        return out
+    for root, _, files in os.walk(base_dir):
+        for f in files:
+            fl = f.lower()
+            if fl.endswith((".mat", ".csv", ".png", ".jpg", ".jpeg")):
+                rel = os.path.relpath(os.path.join(root, f), base_dir)
+                out[rel] = os.path.join(root, f)
     return out
 
 @st.cache_data(ttl=300)
-def list_github_samples():
+def list_github_samples_recursive(user, repo, branch, base_path="SAMPLES"):
+    """
+    Explore récursivement le dossier SAMPLES sur GitHub.
+    Gère repo privé via st.secrets['GITHUB_TOKEN'] si fourni.
+    Retourne (fichiers_dict, debug_list)
+    """
     out = {}
-    # GitHub API pour lister 2 dossiers
-    for sub in ("signals", "images"):
-        api = f"https://api.github.com/repos/{quote(GITHUB_USER)}/{quote(GITHUB_REPO)}/contents/SAMPLES/{sub}?ref={quote(GITHUB_BRANCH)}"
-        r = requests.get(api, timeout=10)
-        if r.status_code == 200:
-            for item in r.json():
-                if item.get("type") == "file":
-                    name = item["name"]
-                    if sub == "signals" and name.lower().endswith((".mat", ".csv")):
-                        out[name] = f"{GITHUB_BASE}/signals/{name}"
-                    if sub == "images" and name.lower().endswith((".png", ".jpg", ".jpeg")):
-                        out[name] = f"{GITHUB_BASE}/images/{name}"
-    return out
+    api_base = f"https://api.github.com/repos/{quote(user)}/{quote(repo)}/contents"
+    headers = {}
+    token = st.secrets.get("GITHUB_TOKEN", None) if hasattr(st, "secrets") else None
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    debug = []
+
+    def walk(path):
+        url = f"{api_base}/{quote(path)}?ref={quote(branch)}"
+        r = requests.get(url, headers=headers, timeout=15)
+        debug.append({"path": path, "status": r.status_code})
+        if r.status_code != 200:
+            return
+        items = r.json()
+        if not isinstance(items, list):
+            return
+        for it in items:
+            t = it.get("type")
+            name = it.get("name", "")
+            if t == "dir":
+                walk(f"{path}/{name}")
+            elif t == "file":
+                nl = name.lower()
+                if nl.endswith((".mat", ".csv", ".png", ".jpg", ".jpeg")):
+                    raw_url = f"https://raw.githubusercontent.com/{quote(user)}/{quote(repo)}/{quote(branch)}/{path}/{name}"
+                    out[f"{path}/{name}"] = raw_url
+
+    walk(base_path)
+    return out, debug
 
 with st.expander("📁 Samples (choisir un fichier dans SAMPLES)"):
-    samples_local = list_local_samples()
-    samples_gh = list_github_samples() if not samples_local else {}
-    source = "Local" if samples_local else ("GitHub" if samples_gh else "—")
-    st.caption(f"Source détectée : **{source}**")
+    samples_local = list_local_samples_recursive(LOCAL_SAMPLES_DIR)
+    if samples_local:
+        st.caption(f"Source détectée : **Local** — {len(samples_local)} fichier(s)")
+        if st.checkbox("Afficher la liste locale"):
+            st.code("\n".join(sorted(samples_local.keys())) or "(vide)")
+        SAMPLES = samples_local
+    else:
+        samples_gh, gh_debug = list_github_samples_recursive(GITHUB_USER, GITHUB_REPO, GITHUB_BRANCH, "SAMPLES")
+        st.caption(f"Source détectée : **GitHub** — {len(samples_gh)} fichier(s)")
+        with st.expander("🔎 Diagnostic GitHub API"):
+            # Affiche le chemin interrogé et le status code (200, 404, 403…)
+            if gh_debug:
+                st.dataframe(pd.DataFrame(gh_debug))
+            st.markdown(
+                f"[Ouvrir le dossier SAMPLES dans GitHub]"
+                f"(https://github.com/{GITHUB_USER}/{GITHUB_REPO}/tree/{GITHUB_BRANCH}/SAMPLES)"
+            )
+        if st.checkbox("Afficher la liste GitHub"):
+            st.code("\n".join(sorted(samples_gh.keys())) or "(vide)")
+        SAMPLES = samples_gh
 
-    SAMPLES = samples_local if samples_local else samples_gh
     if not SAMPLES:
-        st.warning("Aucun sample trouvé (ni en local `SAMPLES/` ni sur GitHub).")
+        st.warning(
+            "Aucun sample trouvé.\n\n"
+            "✅ Vérifie que le dossier s’appelle **SAMPLES** (MAJUSCULES) à la racine du repo, "
+            "et qu’il contient des fichiers .mat/.csv/.png/.jpg (dans n’importe quel sous-dossier).\n"
+            "🔒 Repo privé ? Ajoute un secret **GITHUB_TOKEN** dans Streamlit Cloud."
+        )
     else:
         sample_name = st.selectbox("Choisir un exemple :", sorted(SAMPLES.keys()))
         c1, c2 = st.columns(2)
@@ -206,16 +246,19 @@ with st.expander("📁 Samples (choisir un fichier dans SAMPLES)"):
             if st.button("⬇️ Charger l'exemple sélectionné", use_container_width=True):
                 try:
                     src = SAMPLES[sample_name]
-                    # local file -> open ; url -> download
-                    if os.path.exists(src):
+                    if os.path.exists(src):  # local
                         with open(src, "rb") as f:
                             content = f.read()
-                    else:
-                        r = requests.get(src, timeout=20)
+                    else:  # GitHub raw
+                        headers = {}
+                        token = st.secrets.get("GITHUB_TOKEN", None) if hasattr(st, "secrets") else None
+                        if token:
+                            headers["Authorization"] = f"token {token}"
+                        r = requests.get(src, headers=headers, timeout=20)
                         r.raise_for_status()
                         content = r.content
                     bio = io.BytesIO(content)
-                    bio.name = sample_name
+                    bio.name = os.path.basename(sample_name)
                     st.session_state["sample_file"] = bio
                     st.success(f"Exemple chargé : {sample_name}")
                 except Exception as e:
