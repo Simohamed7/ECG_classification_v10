@@ -1,5 +1,5 @@
 # app_ecg_streamlit.py
-import io, requests
+import io, requests, os
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from math import pi
 from PIL import Image
 from tensorflow.keras.models import load_model
+from urllib.parse import quote
 
 st.set_page_config(page_title="Classification ECG", layout="wide")
 
@@ -146,35 +147,83 @@ st.markdown(
 )
 
 # =========================
-# Zone "Samples" (exemples GitHub)
+# Zone "Samples" (local OU GitHub)
 # =========================
-# ⚠️ Remplace <user>/<repo> par ton dépôt et assure-toi d'utiliser des "Raw URLs"
-SAMPLES = {
-    "signal1.mat": "https://raw.githubusercontent.com/<user>/<repo>/main/samples/signals/signal1.mat",
-    "signal2.csv": "https://raw.githubusercontent.com/<user>/<repo>/main/samples/signals/signal2.csv",
-    "beat1.png":   "https://raw.githubusercontent.com/<user>/<repo>/main/samples/images/beat1.png",
-    "beat2.jpg":   "https://raw.githubusercontent.com/<user>/<repo>/main/samples/images/beat2.jpg",
-}
+GITHUB_USER = "Simohamed7"
+GITHUB_REPO = "ECG_classification_v10"
+GITHUB_BRANCH = "main"
+GITHUB_BASE = f"https://raw.githubusercontent.com/{quote(GITHUB_USER)}/{quote(GITHUB_REPO)}/{quote(GITHUB_BRANCH)}/SAMPLES"
 
-with st.expander("📁 Samples (exemples GitHub)"):
-    sample_name = st.selectbox("Choisir un exemple :", list(SAMPLES.keys()))
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("⬇️ Charger l'exemple sélectionné"):
-            try:
-                url = SAMPLES[sample_name]
-                r = requests.get(url, timeout=20)
-                r.raise_for_status()
-                bio = io.BytesIO(r.content)
-                bio.name = sample_name  # important pour .name.lower()
-                st.session_state["sample_file"] = bio
-                st.success(f"Exemple chargé : {sample_name}")
-            except Exception as e:
-                st.error(f"Échec du téléchargement : {e}")
-    with c2:
-        if st.button("🔄 Réinitialiser l'exemple"):
-            st.session_state.pop("sample_file", None)
-            st.info("Exemple réinitialisé. Utilisez l'upload ou rechargez un sample.")
+LOCAL_SAMPLES_DIR = "SAMPLES"
+
+@st.cache_data(ttl=300)
+def list_local_samples():
+    out = {}
+    # signals
+    loc_sig = os.path.join(LOCAL_SAMPLES_DIR, "signals")
+    if os.path.isdir(loc_sig):
+        for f in os.listdir(loc_sig):
+            if f.lower().endswith((".mat", ".csv")):
+                out[f] = os.path.join(loc_sig, f)
+    # images
+    loc_img = os.path.join(LOCAL_SAMPLES_DIR, "images")
+    if os.path.isdir(loc_img):
+        for f in os.listdir(loc_img):
+            if f.lower().endswith((".png", ".jpg", ".jpeg")):
+                out[f] = os.path.join(loc_img, f)
+    return out
+
+@st.cache_data(ttl=300)
+def list_github_samples():
+    out = {}
+    # GitHub API pour lister 2 dossiers
+    for sub in ("signals", "images"):
+        api = f"https://api.github.com/repos/{quote(GITHUB_USER)}/{quote(GITHUB_REPO)}/contents/SAMPLES/{sub}?ref={quote(GITHUB_BRANCH)}"
+        r = requests.get(api, timeout=10)
+        if r.status_code == 200:
+            for item in r.json():
+                if item.get("type") == "file":
+                    name = item["name"]
+                    if sub == "signals" and name.lower().endswith((".mat", ".csv")):
+                        out[name] = f"{GITHUB_BASE}/signals/{name}"
+                    if sub == "images" and name.lower().endswith((".png", ".jpg", ".jpeg")):
+                        out[name] = f"{GITHUB_BASE}/images/{name}"
+    return out
+
+with st.expander("📁 Samples (choisir un fichier dans SAMPLES)"):
+    samples_local = list_local_samples()
+    samples_gh = list_github_samples() if not samples_local else {}
+    source = "Local" if samples_local else ("GitHub" if samples_gh else "—")
+    st.caption(f"Source détectée : **{source}**")
+
+    SAMPLES = samples_local if samples_local else samples_gh
+    if not SAMPLES:
+        st.warning("Aucun sample trouvé (ni en local `SAMPLES/` ni sur GitHub).")
+    else:
+        sample_name = st.selectbox("Choisir un exemple :", sorted(SAMPLES.keys()))
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("⬇️ Charger l'exemple sélectionné", use_container_width=True):
+                try:
+                    src = SAMPLES[sample_name]
+                    # local file -> open ; url -> download
+                    if os.path.exists(src):
+                        with open(src, "rb") as f:
+                            content = f.read()
+                    else:
+                        r = requests.get(src, timeout=20)
+                        r.raise_for_status()
+                        content = r.content
+                    bio = io.BytesIO(content)
+                    bio.name = sample_name
+                    st.session_state["sample_file"] = bio
+                    st.success(f"Exemple chargé : {sample_name}")
+                except Exception as e:
+                    st.error(f"Échec du chargement : {e}")
+        with c2:
+            if st.button("🔄 Réinitialiser l'exemple", use_container_width=True):
+                st.session_state.pop("sample_file", None)
+                st.info("Exemple réinitialisé. Importez un fichier ou rechargez un sample.")
 
 # =========================
 # Sidebar
@@ -192,11 +241,11 @@ uploaded_signal = st.sidebar.file_uploader(
 # Si un sample est choisi, il remplace l'upload
 if "sample_file" in st.session_state and st.session_state["sample_file"] is not None:
     uploaded_signal = st.session_state["sample_file"]
-    st.info(f"Fichier en cours : **{uploaded_signal.name}** (depuis Samples)")
+    st.info(f"Fichier en cours : **{uploaded_signal.name}** (depuis SAMPLES)")
 
 # fs & alpha
 fs = st.sidebar.number_input("Fréquence d'échantillonnage (Hz)", value=360, step=10, min_value=50, max_value=2000)
-alpha_selected = st.sidebar.slider("Ordre FrFT (alpha)", 0.01, 1.0, 0.50, 0.01)
+alpha_selected = st.sidebar.slider("Ordre FrFT (alpha)", 0.01, 1.0, 0.01, 0.01)
 
 # =========================
 # Chargement modèle (non bloquant)
